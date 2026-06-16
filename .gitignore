@@ -19,5 +19,4 @@ dist/
 htmlcov/
 .ipynb_checkpoints/
 .env
-.env.*
 *.log

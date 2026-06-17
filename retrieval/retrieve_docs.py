@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 from dotenv import load_dotenv
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores.pgvector import PGVector
 from sqlalchemy import create_engine, Column, String, Integer, Text, DateTime
 from sqlalchemy.orm import declarative_base, Session
@@ -25,7 +25,7 @@ DB_PORT = os.getenv("DB_PORT", "5432")
 DB_NAME = os.getenv("DB_NAME", "rtps_vectors")
 DB_USER = os.getenv("DB_USER", "rtps_user")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "change_me")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # Connection string for LangChain PGVector
 CONNECTION_STRING = (
@@ -33,7 +33,45 @@ CONNECTION_STRING = (
 )
 
 # Embedding configuration
-EMBEDDING_DIMENSION = 3072
+EMBEDDING_DIMENSION = 1536
+
+
+def get_pgvector_store() -> PGVector:
+    """Return a LangChain PGVector store connected to the text_chunks table."""
+
+    if not OPENAI_API_KEY:
+        raise ValueError("OPENAI_API_KEY is not set")
+
+    embeddings = OpenAIEmbeddings(
+        model="text-embedding-3-small",
+        openai_api_key=OPENAI_API_KEY,
+    )
+
+    return PGVector(
+        connection_string=CONNECTION_STRING,
+        embedding_function=embeddings,
+        collection_name="text_chunks",
+        use_jsonb=False,
+    )
+
+
+def get_pgvector_retriever(
+    department_filter: Optional[str] = None,
+    top_k: int = 4,
+):
+    """Return a LangChain retriever backed by the pgvector store."""
+
+    vector_store = get_pgvector_store()
+
+    if department_filter:
+        return vector_store.as_retriever(
+            search_kwargs={
+                "k": top_k,
+                "filter": {"department": department_filter},
+            }
+        )
+
+    return vector_store.as_retriever(search_kwargs={"k": top_k})
 
 
 def retrieve_relevant_docs(
@@ -67,35 +105,10 @@ def retrieve_relevant_docs(
     """
 
     try:
-        # Initialize embeddings model
-        embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/gemini-embedding-001",
-            google_api_key=GEMINI_API_KEY,
+        retriever = get_pgvector_retriever(
+            department_filter=department_filter,
+            top_k=top_k,
         )
-
-        # Initialize PGVector store
-        vector_store = PGVector(
-            connection_string=CONNECTION_STRING,
-            embedding_function=embeddings,
-            table_name="text_chunks",
-            use_jsonb=False,
-        )
-
-        # Build the retriever with optional metadata filter
-        if department_filter:
-            # Create a filter for department
-            metadata_filter = {"department": department_filter}
-            retriever = vector_store.as_retriever(
-                search_kwargs={
-                    "k": top_k,
-                    "filter": metadata_filter,
-                }
-            )
-        else:
-            # No filter, simple similarity search
-            retriever = vector_store.as_retriever(
-                search_kwargs={"k": top_k}
-            )
 
         # Perform semantic search
         results = retriever.invoke(query)
@@ -145,9 +158,9 @@ def retrieve_with_sql_filter(
 
     try:
         # Initialize embeddings
-        embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/gemini-embedding-001",
-            google_api_key=GEMINI_API_KEY,
+        embeddings = OpenAIEmbeddings(
+            model="text-embedding-3-small",
+            openai_api_key=OPENAI_API_KEY,
         )
 
         # Generate embedding for query

@@ -1,4 +1,4 @@
-"""Chunk raw text, create Gemini embeddings, and store them in PostgreSQL.
+"""Chunk raw text, create Voyage AI embeddings, and store them in PostgreSQL.
 
 This module is intentionally separate from the db/ bootstrap code so the
 database setup and the vector ingest pipeline stay cleanly isolated.
@@ -10,12 +10,13 @@ import argparse
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 from dotenv import load_dotenv
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, Integer, String, Text, create_engine, func, insert, text
@@ -28,8 +29,8 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
-EMBEDDING_MODEL = "models/gemini-embedding-001"
-EMBEDDING_DIMENSION = 3072
+EMBEDDING_MODEL = "text-embedding-3-small"
+EMBEDDING_DIMENSION = 1536
 
 
 @dataclass(slots=True)
@@ -90,14 +91,14 @@ def build_text_splitter() -> RecursiveCharacterTextSplitter:
     return RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
 
 
-def build_embeddings() -> GoogleGenerativeAIEmbeddings:
-    """Create the LangChain embedding client for Gemini text embeddings."""
+def build_embeddings() -> OpenAIEmbeddings:
+    """Create the LangChain embedding client for OpenAI text embeddings."""
 
-    gemini_api_key = os.getenv("GEMINI_API_KEY")
-    if not gemini_api_key:
-        raise ValueError("GEMINI_API_KEY is not set")
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    if not openai_api_key:
+        raise ValueError("OPENAI_API_KEY is not set")
 
-    return GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL, google_api_key=gemini_api_key)
+    return OpenAIEmbeddings(model=EMBEDDING_MODEL, openai_api_key=openai_api_key)
 
 
 def load_raw_records(input_path: Path) -> list[RawTextRecord]:
@@ -158,23 +159,29 @@ def chunk_records(records: Iterable[RawTextRecord]) -> list[dict]:
     return chunk_rows
 
 
-def embed_chunk_texts(chunk_rows: list[dict], embeddings: GoogleGenerativeAIEmbeddings) -> list[list[float]]:
-    """Batch-embed the chunk texts for efficient database writes."""
+def embed_chunk_texts(chunk_rows: list[dict], embeddings: OpenAIEmbeddings, batch_size: int = 100) -> list[list[float]]:
+    """Embed chunk texts in small batches to stay within Voyage AI rate limits."""
 
     texts = [row["chunk_text"] for row in chunk_rows]
     if not texts:
         return []
 
-    return embeddings.embed_documents(texts)
+    vectors: list[list[float]] = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i: i + batch_size]
+        logging.info("Embedding batch %d–%d of %d ...", i + 1, min(i + batch_size, len(texts)), len(texts))
+        vectors.extend(embeddings.embed_documents(batch))
+
+    return vectors
 
 
 def create_schema(engine) -> None:
-    """Create the table structure if it does not already exist."""
-
-    Base.metadata.create_all(engine)
+    """Drop and recreate the table so the embedding dimension is always correct."""
 
     with engine.begin() as connection:
-        connection.execute(text("ALTER TABLE IF EXISTS text_chunks ALTER COLUMN embedding TYPE vector(3072) USING embedding::vector(3072);"))
+        connection.execute(text("DROP TABLE IF EXISTS text_chunks CASCADE;"))
+
+    Base.metadata.create_all(engine)
 
 
 def persist_chunks(session: Session, chunk_rows: list[dict], vectors: list[list[float]]) -> int:
